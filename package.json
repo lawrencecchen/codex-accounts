@@ -1,9 +1,11 @@
 {
   "name": "codex-accounts",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Manage multiple OpenAI Codex accounts and monitor usage limits",
   "type": "module",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "bin": {
     "cx": "dist/index.js",
     "codex-accounts": "dist/index.js"
