@@ -1,0 +1,23 @@
+{
+  "name": "codex-accounts",
+  "version": "0.1.0",
+  "description": "Manage multiple OpenAI Codex accounts and monitor usage limits",
+  "type": "module",
+  "bin": {
+    "codex-accounts": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  },
+  "license": "MIT"
+}
