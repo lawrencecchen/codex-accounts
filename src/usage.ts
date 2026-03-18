@@ -18,12 +18,10 @@ function formatDuration(seconds: number): string {
   return parts.length > 0 ? parts.join(" ") : "<1m";
 }
 
-/** Fetch usage for a single auth credential */
-export async function fetchUsage(auth: CodexAuthFile): Promise<UsageResponse> {
-  // Refresh token if needed
+/** Refresh auth and persist if needed, returns fresh auth */
+export async function ensureFreshAuth(auth: CodexAuthFile): Promise<CodexAuthFile> {
   const { auth: freshAuth, refreshed } = await refreshIfExpired(auth);
   if (refreshed) {
-    // Persist refreshed tokens
     const email = extractEmail(freshAuth.tokens.id_token);
     if (email) {
       const stored = findAccount(email);
@@ -33,12 +31,16 @@ export async function fetchUsage(auth: CodexAuthFile): Promise<UsageResponse> {
       }
     }
   }
+  return freshAuth;
+}
 
+/** Fetch usage for a single (already-refreshed) auth credential */
+export async function fetchUsage(auth: CodexAuthFile): Promise<UsageResponse> {
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${freshAuth.tokens.access_token}`,
+    Authorization: `Bearer ${auth.tokens.access_token}`,
   };
-  if (freshAuth.tokens.account_id) {
-    headers["ChatGPT-Account-ID"] = freshAuth.tokens.account_id;
+  if (auth.tokens.account_id) {
+    headers["ChatGPT-Account-ID"] = auth.tokens.account_id;
   }
 
   const res = await fetch(USAGE_URL, { headers });
@@ -48,6 +50,12 @@ export async function fetchUsage(auth: CodexAuthFile): Promise<UsageResponse> {
   }
 
   return (await res.json()) as UsageResponse;
+}
+
+/** Refresh + fetch in one call (convenience for single-account use) */
+export async function refreshAndFetchUsage(auth: CodexAuthFile): Promise<UsageResponse> {
+  const fresh = await ensureFreshAuth(auth);
+  return fetchUsage(fresh);
 }
 
 /** Convert raw usage response to display format */

@@ -95,23 +95,36 @@ export function removeAccount(email: string): boolean {
 /** Detect which stored account is currently active */
 export function detectActiveAccount(): string | null {
   const active = readActiveAuth();
-  if (!active?.tokens?.id_token) return null;
-  const email = extractEmail(active.tokens.id_token);
-  if (!email) return null;
-  // Verify it exists in our store
-  if (findAccount(email)) return email;
+  if (!active) return null;
+
+  // OAuth account: match by email from id_token
+  if (active.tokens?.id_token) {
+    const email = extractEmail(active.tokens.id_token);
+    if (email && findAccount(email)) return email;
+  }
+
+  // API key account: match by key prefix
+  if (active.OPENAI_API_KEY) {
+    const accounts = listAccounts();
+    const match = accounts.find(a => a.auth.OPENAI_API_KEY === active.OPENAI_API_KEY);
+    if (match) return match.email;
+  }
+
   return null;
 }
 
 /** Save-back the current active auth to the stored account (preserves token rotations) */
 export function syncActiveToStore(): void {
   const active = readActiveAuth();
-  if (!active?.tokens?.id_token) return;
-  const email = extractEmail(active.tokens.id_token);
-  if (!email) return;
-  const existing = findAccount(email);
-  if (existing) {
-    existing.auth = active;
-    saveAccount(existing);
+  if (!active) return;
+
+  if (active.tokens?.id_token) {
+    const email = extractEmail(active.tokens.id_token);
+    if (!email) return;
+    const existing = findAccount(email);
+    if (existing) {
+      existing.auth = active;
+      saveAccount(existing);
+    }
   }
 }

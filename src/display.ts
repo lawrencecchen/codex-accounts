@@ -28,19 +28,66 @@ function barBgColor(usedPercent: number): string {
 
 /** Render a usage bar */
 function renderBar(usedPercent: number, width: number = 20): string {
-  const remaining = 100 - usedPercent;
   const filled = Math.round((usedPercent / 100) * width);
   const empty = width - filled;
   const bg = barBgColor(usedPercent);
   return `${bg}${" ".repeat(filled)}${BG_GRAY}${" ".repeat(empty)}${RESET}`;
 }
 
+interface Row {
+  label: string;
+  usedPercent: number;
+  resetsIn?: string;
+}
+
+/** Collect all display rows for an account */
+function collectRows(usage: AccountUsage): Row[] {
+  const rows: Row[] = [];
+
+  if (usage.primary) {
+    const windowLabel = usage.primary.windowMinutes >= 60
+      ? `${Math.round(usage.primary.windowMinutes / 60)}h limit`
+      : `${usage.primary.windowMinutes}m limit`;
+    rows.push({ label: windowLabel, usedPercent: usage.primary.usedPercent, resetsIn: usage.primary.resetsIn });
+  }
+
+  if (usage.secondary) {
+    const windowLabel = usage.secondary.windowMinutes
+      ? usage.secondary.windowMinutes >= 1440
+        ? `${Math.round(usage.secondary.windowMinutes / 1440)}d limit`
+        : `${Math.round(usage.secondary.windowMinutes / 60)}h limit`
+      : "Weekly limit";
+    rows.push({ label: windowLabel, usedPercent: usage.secondary.usedPercent, resetsIn: usage.secondary.resetsIn });
+  }
+
+  if (usage.additionalLimits?.length) {
+    for (const limit of usage.additionalLimits) {
+      if (limit.primary) {
+        rows.push({ label: limit.name, usedPercent: limit.primary.usedPercent, resetsIn: limit.primary.resetsIn });
+      }
+      if (limit.secondary) {
+        rows.push({ label: `${limit.name} (weekly)`, usedPercent: limit.secondary.usedPercent, resetsIn: limit.secondary.resetsIn });
+      }
+    }
+  }
+
+  return rows;
+}
+
+function formatDisplayName(email: string): string {
+  return email.startsWith("apikey:")
+    ? `${email.slice(7)} ${DIM}(api key)${RESET}`
+    : email;
+}
+
 /** Display a single account's usage */
-function displayAccount(usage: AccountUsage): void {
+function displayAccount(usage: AccountUsage, globalLabelWidth: number, index?: number): void {
   const activeMarker = usage.isActive ? ` ${CYAN}(active)${RESET}` : "";
   const plan = usage.planType ? ` ${DIM}[${usage.planType}]${RESET}` : "";
+  const prefix = index !== undefined ? `${DIM}${index})${RESET} ` : "";
 
-  console.log(`${BOLD}${WHITE}${usage.email}${RESET}${plan}${activeMarker}`);
+  const displayName = formatDisplayName(usage.email);
+  console.log(`${prefix}${BOLD}${WHITE}${displayName}${RESET}${plan}${activeMarker}`);
 
   if (usage.error) {
     console.log(`  ${RED}Error: ${usage.error}${RESET}`);
@@ -48,54 +95,23 @@ function displayAccount(usage: AccountUsage): void {
     return;
   }
 
-  if (usage.primary) {
-    const pct = usage.primary.usedPercent;
-    const remaining = (100 - pct).toFixed(1);
-    const windowLabel = usage.primary.windowMinutes >= 60
-      ? `${Math.round(usage.primary.windowMinutes / 60)}h`
-      : `${usage.primary.windowMinutes}m`;
-    const resetStr = usage.primary.resetsIn ? ` ${DIM}resets in ${usage.primary.resetsIn}${RESET}` : "";
-    const color = usageColor(pct);
-    console.log(`  ${windowLabel} limit:  ${renderBar(pct)} ${color}${remaining}% left${RESET}${resetStr}`);
-  }
+  const rows = collectRows(usage);
 
-  if (usage.secondary) {
-    const pct = usage.secondary.usedPercent;
+  for (const row of rows) {
+    const padded = row.label.padEnd(globalLabelWidth);
+    const pct = row.usedPercent;
     const remaining = (100 - pct).toFixed(1);
-    const windowLabel = usage.secondary.windowMinutes
-      ? usage.secondary.windowMinutes >= 1440
-        ? `${Math.round(usage.secondary.windowMinutes / 1440)}d`
-        : `${Math.round(usage.secondary.windowMinutes / 60)}h`
-      : "Weekly";
-    const resetStr = usage.secondary.resetsIn ? ` ${DIM}resets in ${usage.secondary.resetsIn}${RESET}` : "";
     const color = usageColor(pct);
-    console.log(`  ${windowLabel} limit: ${renderBar(pct)} ${color}${remaining}% left${RESET}${resetStr}`);
-  }
-
-  if (usage.additionalLimits?.length) {
-    for (const limit of usage.additionalLimits) {
-      if (limit.primary) {
-        const pct = limit.primary.usedPercent;
-        const remaining = (100 - pct).toFixed(1);
-        const color = usageColor(pct);
-        const resetStr = limit.primary.resetsIn ? ` ${DIM}resets in ${limit.primary.resetsIn}${RESET}` : "";
-        console.log(`  ${DIM}${limit.name}:${RESET} ${renderBar(pct)} ${color}${remaining}% left${RESET}${resetStr}`);
-      }
-      if (limit.secondary) {
-        const pct = limit.secondary.usedPercent;
-        const remaining = (100 - pct).toFixed(1);
-        const color = usageColor(pct);
-        const resetStr = limit.secondary.resetsIn ? ` ${DIM}resets in ${limit.secondary.resetsIn}${RESET}` : "";
-        console.log(`  ${DIM}${limit.name} (weekly):${RESET} ${renderBar(pct)} ${color}${remaining}% left${RESET}${resetStr}`);
-      }
-    }
+    const resetStr = row.resetsIn ? ` ${DIM}resets in ${row.resetsIn}${RESET}` : "";
+    console.log(`  ${DIM}${padded}:${RESET} ${renderBar(pct)} ${color}${remaining}% left${RESET}${resetStr}`);
   }
 
   if (usage.credits) {
+    const padded = "Credits".padEnd(globalLabelWidth);
     if (usage.credits.unlimited) {
-      console.log(`  ${DIM}Credits:${RESET} ${GREEN}Unlimited${RESET}`);
+      console.log(`  ${DIM}${padded}:${RESET} ${GREEN}Unlimited${RESET}`);
     } else if (usage.credits.balance) {
-      console.log(`  ${DIM}Credits:${RESET} $${usage.credits.balance}`);
+      console.log(`  ${DIM}${padded}:${RESET} $${usage.credits.balance}`);
     }
   }
 
@@ -109,9 +125,47 @@ export function displayAllUsage(usages: AccountUsage[]): void {
     return;
   }
 
+  // Find the max label width across ALL accounts so everything aligns
+  let maxLabelWidth = 0;
+  for (const usage of usages) {
+    if (usage.error) continue;
+    const rows = collectRows(usage);
+    for (const row of rows) {
+      maxLabelWidth = Math.max(maxLabelWidth, row.label.length);
+    }
+    if (usage.credits) {
+      maxLabelWidth = Math.max(maxLabelWidth, "Credits".length);
+    }
+  }
+
   console.log();
   for (const usage of usages) {
-    displayAccount(usage);
+    displayAccount(usage, maxLabelWidth);
+  }
+}
+
+/** Display usage for all accounts with numbered indices for interactive selection */
+export function displayAllUsageNumbered(usages: AccountUsage[]): void {
+  if (usages.length === 0) {
+    console.log(`${DIM}No accounts configured. Run 'cx add' to add one.${RESET}`);
+    return;
+  }
+
+  let maxLabelWidth = 0;
+  for (const usage of usages) {
+    if (usage.error) continue;
+    const rows = collectRows(usage);
+    for (const row of rows) {
+      maxLabelWidth = Math.max(maxLabelWidth, row.label.length);
+    }
+    if (usage.credits) {
+      maxLabelWidth = Math.max(maxLabelWidth, "Credits".length);
+    }
+  }
+
+  console.log();
+  for (let i = 0; i < usages.length; i++) {
+    displayAccount(usages[i]!, maxLabelWidth, i + 1);
   }
 }
 
@@ -126,7 +180,8 @@ export function displayAccountList(accounts: { email: string; isActive: boolean;
   for (const acct of accounts) {
     const marker = acct.isActive ? `${CYAN} *${RESET}` : "";
     const date = new Date(acct.addedAt).toLocaleDateString();
-    console.log(`  ${WHITE}${acct.email}${RESET}${marker} ${DIM}(added ${date})${RESET}`);
+    const displayName = formatDisplayName(acct.email);
+    console.log(`  ${WHITE}${displayName}${RESET}${marker} ${DIM}(added ${date})${RESET}`);
   }
   console.log();
   console.log(`${DIM}* = currently active in ~/.codex/auth.json${RESET}`);

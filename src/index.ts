@@ -1,24 +1,26 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { readActiveAuth, writeActiveAuth, listAccounts, saveAccount, findAccount, removeAccount, detectActiveAccount, syncActiveToStore } from "./store.js";
 import { extractEmail } from "./jwt.js";
 import { refreshIfExpired } from "./token-refresh.js";
-import { fetchUsage, formatUsage } from "./usage.js";
-import { displayAllUsage, displayAccountList } from "./display.js";
-import type { StoredAccount } from "./types.js";
+import { fetchUsage, formatUsage, ensureFreshAuth } from "./usage.js";
+import { displayAllUsage, displayAllUsageNumbered, displayAccountList } from "./display.js";
+import type { StoredAccount, CodexAuthFile } from "./types.js";
 
-const HELP = `codex-accounts - Manage multiple OpenAI Codex accounts
+const HELP = `cx - Manage multiple OpenAI Codex accounts
 
 Usage:
-  codex-accounts                  Show usage for all accounts
-  codex-accounts add              Add a new account (opens OAuth login)
-  codex-accounts import           Import current ~/.codex/auth.json account
-  codex-accounts list             List all accounts
-  codex-accounts switch <email>   Switch active account
-  codex-accounts remove <email>   Remove an account
-  codex-accounts status           Show detailed usage for all accounts
-  codex-accounts help             Show this help message
+  cx                    Show usage for all accounts and switch
+  cx add                Add a new account (opens OAuth login)
+  cx add-key            Add an API key account
+  cx import             Import current ~/.codex/auth.json account
+  cx list               List all accounts
+  cx switch [email]     Switch active account
+  cx remove <email>     Remove an account
+  cx status             Show usage (non-interactive)
+  cx help               Show this help message
 `;
 
 /** Run codex login and capture the resulting auth */
@@ -75,6 +77,55 @@ async function cmdAdd(): Promise<void> {
     };
     saveAccount(account);
     console.log(`\nAdded account: ${email}`);
+  }
+}
+
+async function cmdAddKey(): Promise<void> {
+  syncActiveToStore();
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const label = await new Promise<string>((resolve) => {
+    rl.question("Label (e.g. work, personal): ", resolve);
+  });
+  const key = await new Promise<string>((resolve) => {
+    rl.question("API key (sk-...): ", resolve);
+  });
+  rl.close();
+
+  const trimmedLabel = label.trim();
+  const trimmedKey = key.trim();
+
+  if (!trimmedLabel) {
+    console.error("Label is required.");
+    process.exit(1);
+  }
+  if (!trimmedKey.startsWith("sk-")) {
+    console.error("Invalid API key format (expected sk-...).");
+    process.exit(1);
+  }
+
+  const auth: CodexAuthFile = {
+    tokens: { access_token: "", refresh_token: "", id_token: "" },
+    last_refresh: new Date().toISOString(),
+    auth_mode: "apikey",
+    OPENAI_API_KEY: trimmedKey,
+  };
+
+  // Use label as the identifier (prefixed to distinguish from emails)
+  const identifier = `apikey:${trimmedLabel}`;
+  const existing = findAccount(identifier);
+  if (existing) {
+    existing.auth = auth;
+    saveAccount(existing);
+    console.log(`Updated API key account: ${trimmedLabel}`);
+  } else {
+    const account: StoredAccount = {
+      email: identifier,
+      addedAt: new Date().toISOString(),
+      auth,
+    };
+    saveAccount(account);
+    console.log(`Added API key account: ${trimmedLabel}`);
   }
 }
 
@@ -140,6 +191,44 @@ async function cmdList(): Promise<void> {
       addedAt: a.addedAt,
     }))
   );
+}
+
+async function promptSwitch(): Promise<void> {
+  const accounts = listAccounts();
+  if (accounts.length === 0) {
+    console.error("No accounts configured. Run 'codex-accounts add' to add one.");
+    process.exit(1);
+  }
+
+  const activeEmail = detectActiveAccount();
+  console.log();
+  for (let i = 0; i < accounts.length; i++) {
+    const a = accounts[i]!;
+    const marker = a.email === activeEmail ? " \x1b[36m(active)\x1b[0m" : "";
+    const displayName = a.email.startsWith("apikey:")
+      ? `${a.email.slice(7)} \x1b[2m(api key)\x1b[0m`
+      : a.email;
+    console.log(`  ${i + 1}) ${displayName}${marker}`);
+  }
+  console.log();
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await new Promise<string>((resolve) => {
+    rl.question("Switch to (#): ", resolve);
+  });
+  rl.close();
+
+  const idx = parseInt(answer.trim(), 10) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= accounts.length) {
+    // Try as email/partial match
+    if (answer.trim()) {
+      return cmdSwitch(answer.trim());
+    }
+    console.error("Invalid selection.");
+    process.exit(1);
+  }
+
+  return cmdSwitch(accounts[idx]!.email);
 }
 
 async function cmdSwitch(email: string): Promise<void> {
@@ -216,10 +305,35 @@ async function cmdStatus(): Promise<void> {
   }
 
   const activeEmail = detectActiveAccount();
-  const usages = await Promise.all(
-    accounts.map(async (account) => {
+
+  // Split into OAuth and API key accounts
+  const oauthAccounts = accounts.filter(a => a.auth.auth_mode !== "apikey");
+  const apiKeyAccounts = accounts.filter(a => a.auth.auth_mode === "apikey");
+
+  // Phase 1: Refresh all OAuth tokens in parallel
+  const refreshed = await Promise.all(
+    oauthAccounts.map(async (account) => {
       try {
-        const raw = await fetchUsage(account.auth);
+        const freshAuth = await ensureFreshAuth(account.auth);
+        return { account, freshAuth, error: undefined };
+      } catch (err) {
+        return { account, freshAuth: account.auth, error: (err as Error).message };
+      }
+    })
+  );
+
+  // Phase 2: Fetch all OAuth usage in parallel
+  const oauthUsages = await Promise.all(
+    refreshed.map(async ({ account, freshAuth, error: refreshError }) => {
+      if (refreshError) {
+        return {
+          email: account.email,
+          isActive: account.email === activeEmail,
+          error: refreshError,
+        };
+      }
+      try {
+        const raw = await fetchUsage(freshAuth);
         return formatUsage(account.email, account.email === activeEmail, raw);
       } catch (err) {
         return {
@@ -231,17 +345,105 @@ async function cmdStatus(): Promise<void> {
     })
   );
 
+  // API key accounts: no usage available
+  const apiKeyUsages = apiKeyAccounts.map(account => ({
+    email: account.email,
+    isActive: account.email === activeEmail,
+    planType: "api key",
+  }));
+
+  const usages = [...oauthUsages, ...apiKeyUsages];
+
   displayAllUsage(usages);
+}
+
+/** Default interactive mode: show all usage, prompt to switch */
+async function cmdDefault(): Promise<void> {
+  autoImportIfEmpty();
+  const accounts = listAccounts();
+  if (accounts.length === 0) {
+    console.log("No accounts configured. Run 'cx add' to add one.");
+    return;
+  }
+
+  const activeEmail = detectActiveAccount();
+
+  const oauthAccounts = accounts.filter(a => a.auth.auth_mode !== "apikey");
+  const apiKeyAccounts = accounts.filter(a => a.auth.auth_mode === "apikey");
+
+  const refreshed = await Promise.all(
+    oauthAccounts.map(async (account) => {
+      try {
+        const freshAuth = await ensureFreshAuth(account.auth);
+        return { account, freshAuth, error: undefined };
+      } catch (err) {
+        return { account, freshAuth: account.auth, error: (err as Error).message };
+      }
+    })
+  );
+
+  const oauthUsages = await Promise.all(
+    refreshed.map(async ({ account, freshAuth, error: refreshError }) => {
+      if (refreshError) {
+        return { email: account.email, isActive: account.email === activeEmail, error: refreshError };
+      }
+      try {
+        const raw = await fetchUsage(freshAuth);
+        return formatUsage(account.email, account.email === activeEmail, raw);
+      } catch (err) {
+        return { email: account.email, isActive: account.email === activeEmail, error: (err as Error).message };
+      }
+    })
+  );
+
+  const apiKeyUsages = apiKeyAccounts.map(account => ({
+    email: account.email,
+    isActive: account.email === activeEmail,
+    planType: "api key",
+  }));
+
+  const usages = [...oauthUsages, ...apiKeyUsages];
+  displayAllUsageNumbered(usages);
+
+  // Prompt to switch
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await new Promise<string>((resolve) => {
+    rl.question(`Switch to (#): `, resolve);
+  });
+  rl.close();
+
+  const trimmed = answer.trim();
+  if (!trimmed) return;
+
+  const idx = parseInt(trimmed, 10) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= accounts.length) {
+    if (trimmed) {
+      return cmdSwitch(trimmed);
+    }
+    console.error("Invalid selection.");
+    process.exit(1);
+  }
+
+  return cmdSwitch(accounts[idx]!.email);
 }
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const command = args[0] || "status";
+  const command = args[0];
+
+  if (!command) {
+    await cmdDefault();
+    return;
+  }
 
   switch (command) {
     case "add":
     case "login":
       await cmdAdd();
+      break;
+    case "add-key":
+    case "add-api-key":
+      await cmdAddKey();
       break;
     case "import":
       await cmdImport();
@@ -253,15 +455,15 @@ async function main(): Promise<void> {
     case "switch":
     case "use":
       if (!args[1]) {
-        console.error("Usage: codex-accounts switch <email>");
-        process.exit(1);
+        await promptSwitch();
+      } else {
+        await cmdSwitch(args[1]);
       }
-      await cmdSwitch(args[1]);
       break;
     case "remove":
     case "rm":
       if (!args[1]) {
-        console.error("Usage: codex-accounts remove <email>");
+        console.error("Usage: cx remove <email>");
         process.exit(1);
       }
       await cmdRemove(args[1]);
@@ -281,7 +483,8 @@ async function main(): Promise<void> {
         const account = findAccount(command);
         if (account) {
           try {
-            const raw = await fetchUsage(account.auth);
+            const fresh = await ensureFreshAuth(account.auth);
+            const raw = await fetchUsage(fresh);
             const usage = formatUsage(account.email, account.email === detectActiveAccount(), raw);
             displayAllUsage([usage]);
           } catch (err) {
