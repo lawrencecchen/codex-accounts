@@ -352,7 +352,10 @@ async function cmdStatus(): Promise<void> {
     planType: "api key",
   }));
 
-  const usages = [...oauthUsages, ...apiKeyUsages];
+  const usageByEmail = new Map(
+    [...oauthUsages, ...apiKeyUsages].map(u => [u.email, u])
+  );
+  const usages = accounts.map(a => usageByEmail.get(a.email)!);
 
   displayAllUsage(usages);
 }
@@ -402,7 +405,11 @@ async function cmdDefault(): Promise<void> {
     planType: "api key",
   }));
 
-  const usages = [...oauthUsages, ...apiKeyUsages];
+  // Keep display order consistent: same order as accounts
+  const usageByEmail = new Map(
+    [...oauthUsages, ...apiKeyUsages].map(u => [u.email, u])
+  );
+  const usages = accounts.map(a => usageByEmail.get(a.email)!);
   displayAllUsageNumbered(usages);
 
   // Prompt to switch
@@ -416,15 +423,17 @@ async function cmdDefault(): Promise<void> {
   if (!trimmed) return;
 
   const idx = parseInt(trimmed, 10) - 1;
-  if (isNaN(idx) || idx < 0 || idx >= accounts.length) {
-    if (trimmed) {
-      return cmdSwitch(trimmed);
-    }
-    console.error("Invalid selection.");
-    process.exit(1);
+  if (idx >= 0 && idx < accounts.length) {
+    return cmdSwitch(accounts[idx]!.email);
   }
 
-  return cmdSwitch(accounts[idx]!.email);
+  // Try as email/partial match
+  if (trimmed) {
+    return cmdSwitch(trimmed);
+  }
+
+  console.error("Invalid selection.");
+  process.exit(1);
 }
 
 async function main(): Promise<void> {
