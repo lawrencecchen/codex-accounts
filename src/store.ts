@@ -1,15 +1,29 @@
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, existsSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { StoredAccount, CodexAuthFile } from "./types.js";
+import type { StoredAccount, CodexAuthFile, AdminKeyEntry, ApiKeyUsageSnapshot } from "./types.js";
 import { extractEmail } from "./jwt.js";
 
 const STORE_DIR = join(homedir(), ".codex-accounts");
 const ACCOUNTS_DIR = join(STORE_DIR, "accounts");
+const ADMIN_KEYS_DIR = join(STORE_DIR, "admin-keys");
+const USAGE_CACHE_DIR = join(STORE_DIR, "usage-cache");
 const CODEX_AUTH_PATH = join(homedir(), ".codex", "auth.json");
 
 function ensureDirs(): void {
   mkdirSync(ACCOUNTS_DIR, { recursive: true });
+}
+
+function ensureAdminDirs(): void {
+  mkdirSync(ADMIN_KEYS_DIR, { recursive: true });
+}
+
+function ensureUsageCacheDir(): void {
+  mkdirSync(USAGE_CACHE_DIR, { recursive: true });
+}
+
+function safeFilename(s: string): string {
+  return s.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
 /** Sanitize email for use as filename */
@@ -38,9 +52,16 @@ export function writeActiveAuth(auth: CodexAuthFile): void {
       // Ignore backup failures
     }
   }
+  // Codex 0.125+ rejects auth.json when tokens.id_token is an empty string.
+  // For API key mode, strip the tokens block entirely and emit only the
+  // fields codex itself writes via `codex login --with-api-key`.
+  const payload =
+    auth.auth_mode === "apikey"
+      ? { auth_mode: "apikey", OPENAI_API_KEY: auth.OPENAI_API_KEY ?? "" }
+      : auth;
   // Atomic write via temp file
   const tmpPath = CODEX_AUTH_PATH + ".tmp";
-  writeFileSync(tmpPath, JSON.stringify(auth, null, 2), { mode: 0o600 });
+  writeFileSync(tmpPath, JSON.stringify(payload, null, 2), { mode: 0o600 });
   renameSync(tmpPath, CODEX_AUTH_PATH);
 }
 
@@ -111,6 +132,111 @@ export function detectActiveAccount(): string | null {
   }
 
   return null;
+}
+
+// --- Admin keys (sk-admin-*) ---
+
+export function listAdminKeys(): AdminKeyEntry[] {
+  ensureAdminDirs();
+  const files = readdirSync(ADMIN_KEYS_DIR).filter(f => f.endsWith(".json"));
+  const out: AdminKeyEntry[] = [];
+  for (const file of files) {
+    try {
+      const raw = readFileSync(join(ADMIN_KEYS_DIR, file), "utf-8");
+      out.push(JSON.parse(raw) as AdminKeyEntry);
+    } catch {
+      // skip
+    }
+  }
+  return out.sort((a, b) => a.label.localeCompare(b.label));
+}
+
+export function findAdminKey(label: string): AdminKeyEntry | null {
+  const path = join(ADMIN_KEYS_DIR, safeFilename(label) + ".json");
+  try {
+    return JSON.parse(readFileSync(path, "utf-8")) as AdminKeyEntry;
+  } catch {
+    return null;
+  }
+}
+
+export function saveAdminKey(entry: AdminKeyEntry): void {
+  ensureAdminDirs();
+  const path = join(ADMIN_KEYS_DIR, safeFilename(entry.label) + ".json");
+  writeFileSync(path, JSON.stringify(entry, null, 2), { mode: 0o600 });
+}
+
+export function removeAdminKey(label: string): boolean {
+  const path = join(ADMIN_KEYS_DIR, safeFilename(label) + ".json");
+  try {
+    unlinkSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Pick the admin key to use for an API-key account. */
+export function pickAdminKeyFor(account: StoredAccount): AdminKeyEntry | null {
+  if (account.adminKeyLabel) {
+    const named = findAdminKey(account.adminKeyLabel);
+    if (named) return named;
+  }
+  const all = listAdminKeys();
+  return all[0] ?? null;
+}
+
+// --- Usage cache ---
+
+interface CachedSnapshot {
+  fetchedAt: string;
+  snapshot: ApiKeyUsageSnapshot;
+}
+
+function usageCachePath(adminLabel: string, projectId: string | undefined): string {
+  const key = `${safeFilename(adminLabel)}__${safeFilename(projectId ?? "all")}.json`;
+  return join(USAGE_CACHE_DIR, key);
+}
+
+export function readUsageCache(
+  adminLabel: string,
+  projectId: string | undefined,
+  maxAgeMs: number,
+): ApiKeyUsageSnapshot | null {
+  ensureUsageCacheDir();
+  const path = usageCachePath(adminLabel, projectId);
+  try {
+    const raw = readFileSync(path, "utf-8");
+    const cached = JSON.parse(raw) as CachedSnapshot;
+    const age = Date.now() - new Date(cached.fetchedAt).getTime();
+    if (age > maxAgeMs) return null;
+    return cached.snapshot;
+  } catch {
+    return null;
+  }
+}
+
+/** Read cached snapshot regardless of TTL (for stale fallback display). */
+export function readUsageCacheStale(
+  adminLabel: string,
+  projectId: string | undefined,
+): ApiKeyUsageSnapshot | null {
+  ensureUsageCacheDir();
+  const path = usageCachePath(adminLabel, projectId);
+  try {
+    const raw = readFileSync(path, "utf-8");
+    const cached = JSON.parse(raw) as CachedSnapshot;
+    return cached.snapshot;
+  } catch {
+    return null;
+  }
+}
+
+export function writeUsageCache(snapshot: ApiKeyUsageSnapshot): void {
+  ensureUsageCacheDir();
+  const path = usageCachePath(snapshot.adminKeyLabel, snapshot.projectId);
+  const payload: CachedSnapshot = { fetchedAt: snapshot.fetchedAt, snapshot };
+  writeFileSync(path, JSON.stringify(payload, null, 2), { mode: 0o600 });
 }
 
 /** Save-back the current active auth to the stored account (preserves token rotations) */

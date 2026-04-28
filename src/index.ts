@@ -2,24 +2,40 @@
 
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { readActiveAuth, writeActiveAuth, listAccounts, saveAccount, findAccount, removeAccount, detectActiveAccount, syncActiveToStore } from "./store.js";
+import { mkdirSync, openSync, appendFileSync } from "node:fs";
+import { readActiveAuth, writeActiveAuth, listAccounts, saveAccount, findAccount, removeAccount, detectActiveAccount, syncActiveToStore, listAdminKeys, findAdminKey, saveAdminKey, removeAdminKey, pickAdminKeyFor, readUsageCache, readUsageCacheStale, writeUsageCache } from "./store.js";
 import { extractEmail } from "./jwt.js";
 import { refreshIfExpired } from "./token-refresh.js";
 import { fetchUsage, formatUsage, ensureFreshAuth } from "./usage.js";
 import { displayAllUsage, displayAllUsageNumbered, displayAccountList } from "./display.js";
-import type { StoredAccount, CodexAuthFile } from "./types.js";
+import { claudeMain } from "./claude.js";
+import { validateAdminKey, listProjects, fetchUsageRollup } from "./openai-admin.js";
+import { rankUsagesForGto } from "./gto.js";
+import type { StoredAccount, CodexAuthFile, AdminKeyEntry, ApiKeyUsageSnapshot, AccountUsage } from "./types.js";
 
-const HELP = `cx - Manage multiple OpenAI Codex accounts
+const USAGE_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+const HELP = `cx - Manage multiple Codex and Claude Code accounts
 
 Usage:
-  cx                    Show usage for all accounts and switch
-  cx add                Add a new account (opens OAuth login)
-  cx add-key            Add an API key account
+  cx                    Show Codex usage for all accounts and switch
+  cx add                Add a new Codex account (opens OAuth login)
+  cx add-key            Add a Codex API key account
   cx import             Import current ~/.codex/auth.json account
-  cx list               List all accounts
-  cx switch [email]     Switch active account
-  cx remove <email>     Remove an account
-  cx status             Show usage (non-interactive)
+  cx list               List all Codex accounts
+  cx switch [email]     Switch active Codex account
+  cx remove <email>     Remove a Codex account
+  cx status             Show Codex usage (non-interactive)
+  cx usage [days]       Refresh and show $ + token spend per API-key (default 30 days)
+
+  cx admin-keys         Manage org admin keys for usage queries:
+    cx add-admin-key    Add an sk-admin-* key (enables \`cx usage\`)
+    cx list-admin-keys  List stored admin keys
+    cx remove-admin-key <label>
+    cx attach-project <api-key-label>   Pick which OpenAI project to scope usage to
+
+  cx claude             Manage Claude Code profiles (cx claude help for details)
+
   cx help               Show this help message
 `;
 
@@ -105,8 +121,6 @@ async function cmdAddKey(): Promise<void> {
   }
 
   const auth: CodexAuthFile = {
-    tokens: { access_token: "", refresh_token: "", id_token: "" },
-    last_refresh: new Date().toISOString(),
     auth_mode: "apikey",
     OPENAI_API_KEY: trimmedKey,
   };
@@ -127,6 +141,340 @@ async function cmdAddKey(): Promise<void> {
     saveAccount(account);
     console.log(`Added API key account: ${trimmedLabel}`);
   }
+}
+
+// --- Admin key commands ---
+
+async function cmdAddAdminKey(): Promise<void> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const label = await new Promise<string>(resolve => {
+    rl.question("Label (e.g. manaflow): ", resolve);
+  });
+  const key = await new Promise<string>(resolve => {
+    rl.question("Admin key (sk-admin-...): ", resolve);
+  });
+  rl.close();
+
+  const trimmedLabel = label.trim();
+  const trimmedKey = key.trim();
+  if (!trimmedLabel) {
+    console.error("Label is required.");
+    process.exit(1);
+  }
+  if (!trimmedKey.startsWith("sk-admin-")) {
+    console.error("Invalid admin key format (expected sk-admin-...).");
+    process.exit(1);
+  }
+
+  process.stdout.write("Validating with OpenAI... ");
+  const validation = await validateAdminKey(trimmedKey);
+  if (!validation.ok) {
+    console.log("\x1b[31mfailed\x1b[0m");
+    console.error(validation.error);
+    process.exit(1);
+  }
+  console.log("\x1b[32mok\x1b[0m");
+
+  const entry: AdminKeyEntry = {
+    label: trimmedLabel,
+    key: trimmedKey,
+    orgId: validation.orgId,
+    addedAt: new Date().toISOString(),
+  };
+  saveAdminKey(entry);
+  console.log(`Added admin key: ${trimmedLabel}`);
+  console.log(`Run 'cx usage' to fetch spend, or 'cx attach-project <api-key>' to scope it per project.`);
+}
+
+async function cmdListAdminKeys(): Promise<void> {
+  const all = listAdminKeys();
+  if (all.length === 0) {
+    console.log("No admin keys. Run 'cx add-admin-key' to add one.");
+    return;
+  }
+  console.log();
+  for (const k of all) {
+    const date = new Date(k.addedAt).toLocaleDateString();
+    const masked = k.key.slice(0, 12) + "***" + k.key.slice(-6);
+    console.log(`  ${k.label}  \x1b[2m${masked}  added ${date}\x1b[0m`);
+  }
+  console.log();
+}
+
+async function cmdRemoveAdminKey(label: string): Promise<void> {
+  if (!findAdminKey(label)) {
+    console.error(`No admin key labeled "${label}".`);
+    process.exit(1);
+  }
+  removeAdminKey(label);
+  console.log(`Removed admin key: ${label}`);
+}
+
+async function cmdAttachProject(apiKeyLabel: string, opts?: { projectId?: string }): Promise<void> {
+  const identifier = apiKeyLabel.startsWith("apikey:") ? apiKeyLabel : `apikey:${apiKeyLabel}`;
+  const account = findAccount(identifier);
+  if (!account) {
+    console.error(`No API-key account named "${apiKeyLabel}". Use 'cx list' to see all.`);
+    process.exit(1);
+  }
+  if (account.auth.auth_mode !== "apikey") {
+    console.error(`"${apiKeyLabel}" is not an API-key account.`);
+    process.exit(1);
+  }
+
+  const admin = pickAdminKeyFor(account);
+  if (!admin) {
+    console.error("No admin key configured. Run 'cx add-admin-key' first.");
+    process.exit(1);
+  }
+
+  process.stdout.write("Listing OpenAI projects... ");
+  const projects = await listProjects(admin.key);
+  console.log(`(${projects.length})`);
+  if (projects.length === 0) {
+    console.error("No projects returned. Make sure the admin key has 'api.management.read' scope.");
+    process.exit(1);
+  }
+
+  let chosenIdx: number;
+  if (opts?.projectId) {
+    if (opts.projectId === "none" || opts.projectId === "org") {
+      chosenIdx = 0;
+    } else {
+      const found = projects.findIndex(p => p.id === opts.projectId || p.name === opts.projectId);
+      if (found === -1) {
+        console.error(`No project matching id/name "${opts.projectId}". Available:`);
+        for (const p of projects) console.error(`  ${p.id}  ${p.name}`);
+        process.exit(1);
+      }
+      chosenIdx = found + 1;
+    }
+  } else {
+    console.log();
+    for (let i = 0; i < projects.length; i++) {
+      console.log(`  ${i + 1}) ${projects[i]!.name}  \x1b[2m${projects[i]!.id}\x1b[0m`);
+    }
+    console.log(`  0) <none / org-wide>`);
+    console.log();
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const ans = await new Promise<string>(resolve => rl.question("Pick project (#): ", resolve));
+    rl.close();
+    chosenIdx = parseInt(ans.trim(), 10);
+    if (isNaN(chosenIdx) || chosenIdx < 0 || chosenIdx > projects.length) {
+      console.error("Invalid selection.");
+      process.exit(1);
+    }
+  }
+
+  if (chosenIdx === 0) {
+    delete account.projectId;
+    delete account.projectName;
+  } else {
+    const proj = projects[chosenIdx - 1]!;
+    account.projectId = proj.id;
+    account.projectName = proj.name;
+  }
+  account.adminKeyLabel = admin.label;
+  saveAccount(account);
+  console.log(`Updated ${apiKeyLabel}: project=${account.projectName ?? "<org-wide>"} via admin=${admin.label}`);
+}
+
+// --- Usage fetching ---
+
+function summarizeDaily(daily: import("./types.js").DailyUsage[]): { todayUsd: number; todayCostEstimated: boolean; weekUsd: number; monthUsd: number; todayTokens: number; weekTokens: number; monthTokens: number } {
+  const tok = (d: import("./types.js").DailyUsage) => d.inputTokens + d.cachedInputTokens + d.outputTokens;
+  const cost = (d: import("./types.js").DailyUsage) => Number(d.costUsd) || 0;
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayRow = daily.find(d => d.date === todayIso);
+  const last7 = daily.slice(-7);
+  const last30 = daily.slice(-30);
+  return {
+    todayUsd: todayRow ? cost(todayRow) : 0,
+    todayCostEstimated: todayRow?.costEstimated ?? false,
+    todayTokens: todayRow ? tok(todayRow) : 0,
+    weekUsd: last7.reduce((s, d) => s + cost(d), 0),
+    weekTokens: last7.reduce((s, d) => s + tok(d), 0),
+    monthUsd: last30.reduce((s, d) => s + cost(d), 0),
+    monthTokens: last30.reduce((s, d) => s + tok(d), 0),
+  };
+}
+
+async function fetchSnapshotForAccount(account: StoredAccount, admin: AdminKeyEntry, days = 30): Promise<ApiKeyUsageSnapshot> {
+  // Single call: fetchUsageRollup runs all 3 OpenAI requests (daily costs,
+  // daily usage, today hourly) concurrently and computes top model from the
+  // already-grouped responses, no extra request.
+  const { daily, topModel } = await fetchUsageRollup(admin.key, days, account.projectId);
+  const sums = summarizeDaily(daily);
+  const snapshot: ApiKeyUsageSnapshot = {
+    adminKeyLabel: admin.label,
+    orgId: admin.orgId,
+    projectId: account.projectId,
+    projectName: account.projectName,
+    fetchedAt: new Date().toISOString(),
+    ...sums,
+    topModel,
+    daily,
+  };
+  writeUsageCache(snapshot);
+  return snapshot;
+}
+
+async function cmdUsage(daysArg?: string): Promise<void> {
+  const days = daysArg ? parseInt(daysArg, 10) : 30;
+  if (isNaN(days) || days < 1 || days > 30) {
+    console.error("days must be 1..30");
+    process.exit(1);
+  }
+  const accounts = listAccounts().filter(a => a.auth.auth_mode === "apikey");
+  if (accounts.length === 0) {
+    console.log("No API-key accounts. Run 'cx add-key' first.");
+    return;
+  }
+  const admins = listAdminKeys();
+  if (admins.length === 0) {
+    console.error("No admin keys. Run 'cx add-admin-key' first.");
+    process.exit(1);
+  }
+
+  console.log(`Fetching ${days}-day usage for ${accounts.length} API-key account(s) in parallel...`);
+  console.log("\x1b[2m(/v1/organization/* endpoints are slow; ~30-60s wall-time per account)\x1b[0m");
+  console.log();
+
+  const activeEmail = detectActiveAccount();
+  const wallStart = Date.now();
+  const usages = await Promise.all(accounts.map(async (account): Promise<AccountUsage> => {
+    const admin = pickAdminKeyFor(account);
+    if (!admin) {
+      console.log(`  ${account.email.replace(/^apikey:/, "")}: \x1b[33mno admin key\x1b[0m`);
+      return {
+        email: account.email,
+        isActive: account.email === activeEmail,
+        planType: "api key",
+        apiKeyHint: "no admin key linked - run 'cx add-admin-key'",
+      };
+    }
+    const t0 = Date.now();
+    try {
+      const snapshot = await fetchSnapshotForAccount(account, admin, days);
+      console.log(`  ${account.email.replace(/^apikey:/, "")} via ${admin.label}: \x1b[32mok\x1b[0m \x1b[2m(${Math.round((Date.now() - t0) / 1000)}s)\x1b[0m`);
+      return {
+        email: account.email,
+        isActive: account.email === activeEmail,
+        planType: "api key",
+        apiKeySpend: snapshot,
+      };
+    } catch (err) {
+      console.log(`  ${account.email.replace(/^apikey:/, "")} via ${admin.label}: \x1b[31mfailed\x1b[0m \x1b[2m(${Math.round((Date.now() - t0) / 1000)}s)\x1b[0m`);
+      return {
+        email: account.email,
+        isActive: account.email === activeEmail,
+        planType: "api key",
+        error: (err as Error).message,
+      };
+    }
+  }));
+  console.log(`\n\x1b[2mwall: ${Math.round((Date.now() - wallStart) / 1000)}s\x1b[0m\n`);
+
+  displayAllUsage(usages);
+}
+
+/** Soft TTL: data older than this triggers a background refresh on default view. */
+const USAGE_REFRESH_AFTER_MS = 5 * 60 * 1000; // 5 min
+
+/**
+ * If any API-key account has stale (or no) cache and an admin key exists,
+ * spawn a detached child to refresh in the background. The parent does not
+ * wait. Next `cx` invocation reads the updated cache.
+ */
+function maybeSpawnBackgroundRefresh(): void {
+  const accounts = listAccounts().filter(a => a.auth.auth_mode === "apikey");
+  if (accounts.length === 0) return;
+  const admins = listAdminKeys();
+  if (admins.length === 0) return;
+
+  const stale = accounts.some(a => {
+    const admin = pickAdminKeyFor(a) ?? admins[0]!;
+    const fresh = readUsageCache(admin.label, a.projectId, USAGE_REFRESH_AFTER_MS);
+    return fresh == null;
+  });
+  if (!stale) return;
+
+  // Self-spawn the hidden refresh command, fully detached. Log stdio to a
+  // rotating file so we can debug if a refresh ever fails.
+  const logDir = `${process.env.HOME ?? "/tmp"}/.codex-accounts`;
+  const logPath = `${logDir}/usage-refresh.log`;
+  let stdio: "ignore" | ["ignore", number, number] = "ignore";
+  try {
+    mkdirSync(logDir, { recursive: true });
+    const fd = openSync(logPath, "a");
+    stdio = ["ignore", fd, fd];
+  } catch {
+    // fall back to ignore
+  }
+  const child = spawn(process.execPath, [process.argv[1]!, "__refresh-usage"], {
+    detached: true,
+    stdio,
+    env: { ...process.env, CX_BG_REFRESH: "1" },
+  });
+  child.unref();
+}
+
+async function cmdRefreshUsageBackground(): Promise<void> {
+  const logPath = `${process.env.HOME ?? "/tmp"}/.codex-accounts/usage-refresh.log`;
+  const log = (msg: string) => {
+    try {
+      appendFileSync(logPath, `[${new Date().toISOString()}] ${msg}\n`);
+    } catch { /* ignore */ }
+  };
+  log("background refresh started");
+  const accounts = listAccounts().filter(a => a.auth.auth_mode === "apikey");
+  const wallStart = Date.now();
+  await Promise.all(accounts.map(async (account) => {
+    const admin = pickAdminKeyFor(account);
+    if (!admin) {
+      log(`skip ${account.email}: no admin key`);
+      return;
+    }
+    const t0 = Date.now();
+    try {
+      await fetchSnapshotForAccount(account, admin, 30);
+      log(`refreshed ${account.email} via ${admin.label} in ${Math.round((Date.now() - t0) / 1000)}s`);
+    } catch (err) {
+      log(`failed ${account.email} after ${Math.round((Date.now() - t0) / 1000)}s: ${(err as Error).message}`);
+    }
+  }));
+  log(`background refresh complete in ${Math.round((Date.now() - wallStart) / 1000)}s`);
+}
+
+
+/** Build an AccountUsage row for an API-key account from cache (no network). */
+function apiKeyUsageFromCache(account: StoredAccount, isActive: boolean, admins: AdminKeyEntry[]): AccountUsage {
+  if (admins.length === 0) {
+    return {
+      email: account.email,
+      isActive,
+      planType: "api key",
+      apiKeyHint: "no admin key - run 'cx add-admin-key' to enable spend display",
+    };
+  }
+  const admin = pickAdminKeyFor(account) ?? admins[0]!;
+  // Try fresh cache first, else stale
+  const fresh = readUsageCache(admin.label, account.projectId, USAGE_CACHE_TTL_MS);
+  const snapshot = fresh ?? readUsageCacheStale(admin.label, account.projectId);
+  if (snapshot) {
+    return {
+      email: account.email,
+      isActive,
+      planType: "api key",
+      apiKeySpend: snapshot,
+    };
+  }
+  return {
+    email: account.email,
+    isActive,
+    planType: "api key",
+    apiKeyHint: `no cached usage - run 'cx usage' (admin: ${admin.label})`,
+  };
 }
 
 /** Import the currently active account from ~/.codex/auth.json without re-logging in */
@@ -345,19 +693,19 @@ async function cmdStatus(): Promise<void> {
     })
   );
 
-  // API key accounts: no usage available
-  const apiKeyUsages = apiKeyAccounts.map(account => ({
-    email: account.email,
-    isActive: account.email === activeEmail,
-    planType: "api key",
-  }));
+  // API key accounts: pull cached spend if any
+  const adminKeys = listAdminKeys();
+  const apiKeyUsages: AccountUsage[] = apiKeyAccounts.map(account =>
+    apiKeyUsageFromCache(account, account.email === activeEmail, adminKeys),
+  );
 
   const usageByEmail = new Map(
     [...oauthUsages, ...apiKeyUsages].map(u => [u.email, u])
   );
-  const usages = accounts.map(a => usageByEmail.get(a.email)!);
+  const usages = rankUsagesForGto(accounts.map(a => usageByEmail.get(a.email)!));
 
   displayAllUsage(usages);
+  maybeSpawnBackgroundRefresh();
 }
 
 /** Default interactive mode: show all usage, prompt to switch */
@@ -399,18 +747,17 @@ async function cmdDefault(): Promise<void> {
     })
   );
 
-  const apiKeyUsages = apiKeyAccounts.map(account => ({
-    email: account.email,
-    isActive: account.email === activeEmail,
-    planType: "api key",
-  }));
+  const adminKeys = listAdminKeys();
+  const apiKeyUsages: AccountUsage[] = apiKeyAccounts.map(account =>
+    apiKeyUsageFromCache(account, account.email === activeEmail, adminKeys),
+  );
 
-  // Keep display order consistent: same order as accounts
   const usageByEmail = new Map(
     [...oauthUsages, ...apiKeyUsages].map(u => [u.email, u])
   );
-  const usages = accounts.map(a => usageByEmail.get(a.email)!);
+  const usages = rankUsagesForGto(accounts.map(a => usageByEmail.get(a.email)!));
   displayAllUsageNumbered(usages);
+  maybeSpawnBackgroundRefresh();
 
   // Prompt to switch
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -423,8 +770,8 @@ async function cmdDefault(): Promise<void> {
   if (!trimmed) return;
 
   const idx = parseInt(trimmed, 10) - 1;
-  if (idx >= 0 && idx < accounts.length) {
-    return cmdSwitch(accounts[idx]!.email);
+  if (idx >= 0 && idx < usages.length) {
+    return cmdSwitch(usages[idx]!.email);
   }
 
   // Try as email/partial match
@@ -464,7 +811,7 @@ async function main(): Promise<void> {
     case "switch":
     case "use":
       if (!args[1]) {
-        await promptSwitch();
+        await cmdDefault();
       } else {
         await cmdSwitch(args[1]);
       }
@@ -478,8 +825,40 @@ async function main(): Promise<void> {
       await cmdRemove(args[1]);
       break;
     case "status":
-    case "usage":
       await cmdStatus();
+      break;
+    case "usage":
+      await cmdUsage(args[1]);
+      break;
+    case "add-admin-key":
+      await cmdAddAdminKey();
+      break;
+    case "list-admin-keys":
+    case "admin-keys":
+      await cmdListAdminKeys();
+      break;
+    case "remove-admin-key":
+      if (!args[1]) {
+        console.error("Usage: cx remove-admin-key <label>");
+        process.exit(1);
+      }
+      await cmdRemoveAdminKey(args[1]);
+      break;
+    case "attach-project": {
+      if (!args[1]) {
+        console.error("Usage: cx attach-project <api-key-label> [--project-id <id-or-name>]");
+        process.exit(1);
+      }
+      const flagIdx = args.indexOf("--project-id");
+      const projectId = flagIdx > -1 ? args[flagIdx + 1] : undefined;
+      await cmdAttachProject(args[1], { projectId });
+      break;
+    }
+    case "__refresh-usage":
+      await cmdRefreshUsageBackground();
+      break;
+    case "claude":
+      await claudeMain(args.slice(1));
       break;
     case "help":
     case "--help":
