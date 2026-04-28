@@ -11,6 +11,8 @@ import { displayAllUsage, displayAllUsageNumbered, displayAccountList } from "./
 import { claudeMain } from "./claude.js";
 import { validateAdminKey, listProjects, fetchUsageRollup } from "./openai-admin.js";
 import { rankUsagesForGto } from "./gto.js";
+import { restartCodexGui } from "./codex-gui.js";
+import { parseSwitchArgs, type SwitchOptions } from "./switch-options.js";
 import type { StoredAccount, CodexAuthFile, AdminKeyEntry, ApiKeyUsageSnapshot, AccountUsage } from "./types.js";
 
 const USAGE_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -24,6 +26,7 @@ Usage:
   cx import             Import current ~/.codex/auth.json account
   cx list               List all Codex accounts
   cx switch [email]     Switch active Codex account
+  cx gui-switch [email] Switch active account and restart Codex.app
   cx remove <email>     Remove a Codex account
   cx status             Show Codex usage (non-interactive)
   cx usage [days]       Refresh and show $ + token spend per API-key (default 30 days)
@@ -541,7 +544,7 @@ async function cmdList(): Promise<void> {
   );
 }
 
-async function promptSwitch(): Promise<void> {
+async function promptSwitch(options: SwitchOptions = { restartCodexGui: false }): Promise<void> {
   const accounts = listAccounts();
   if (accounts.length === 0) {
     console.error("No accounts configured. Run 'codex-accounts add' to add one.");
@@ -570,16 +573,16 @@ async function promptSwitch(): Promise<void> {
   if (isNaN(idx) || idx < 0 || idx >= accounts.length) {
     // Try as email/partial match
     if (answer.trim()) {
-      return cmdSwitch(answer.trim());
+      return cmdSwitch(answer.trim(), options);
     }
     console.error("Invalid selection.");
     process.exit(1);
   }
 
-  return cmdSwitch(accounts[idx]!.email);
+  return cmdSwitch(accounts[idx]!.email, options);
 }
 
-async function cmdSwitch(email: string): Promise<void> {
+async function cmdSwitch(email: string, options: SwitchOptions = { restartCodexGui: false }): Promise<void> {
   const account = findAccount(email);
   if (!account) {
     // Try partial match
@@ -597,7 +600,7 @@ async function cmdSwitch(email: string): Promise<void> {
       }
       process.exit(1);
     }
-    return cmdSwitch(matches[0]!.email);
+    return cmdSwitch(matches[0]!.email, options);
   }
 
   // Save current active auth before switching
@@ -618,7 +621,33 @@ async function cmdSwitch(email: string): Promise<void> {
   }
 
   console.log(`Switched to ${account.email}`);
-  console.log("Restart any running Codex sessions to use the new account.");
+  if (options.restartCodexGui) {
+    await reportCodexGuiRestart();
+  } else {
+    console.log("Restart any running Codex sessions to use the new account.");
+  }
+}
+
+async function reportCodexGuiRestart(): Promise<void> {
+  try {
+    const result = await restartCodexGui();
+    switch (result.status) {
+      case "restarted":
+        console.log("Restarted Codex.app so the GUI uses the new account.");
+        break;
+      case "not-running":
+        console.log("Codex.app is not running; it will use the new account on next launch.");
+        break;
+      case "unsupported":
+      case "failed":
+        console.warn(`Warning: ${result.message}`);
+        console.warn("Restart Codex.app manually to use the new account in the GUI.");
+        break;
+    }
+  } catch (err) {
+    console.warn(`Warning: failed to restart Codex.app: ${(err as Error).message}`);
+    console.warn("Restart Codex.app manually to use the new account in the GUI.");
+  }
 }
 
 async function cmdRemove(email: string): Promise<void> {
@@ -709,7 +738,7 @@ async function cmdStatus(): Promise<void> {
 }
 
 /** Default interactive mode: show all usage, prompt to switch */
-async function cmdDefault(): Promise<void> {
+async function cmdDefault(options: SwitchOptions = { restartCodexGui: false }): Promise<void> {
   autoImportIfEmpty();
   const accounts = listAccounts();
   if (accounts.length === 0) {
@@ -771,12 +800,12 @@ async function cmdDefault(): Promise<void> {
 
   const idx = parseInt(trimmed, 10) - 1;
   if (idx >= 0 && idx < usages.length) {
-    return cmdSwitch(usages[idx]!.email);
+    return cmdSwitch(usages[idx]!.email, options);
   }
 
   // Try as email/partial match
   if (trimmed) {
-    return cmdSwitch(trimmed);
+    return cmdSwitch(trimmed, options);
   }
 
   console.error("Invalid selection.");
@@ -809,13 +838,25 @@ async function main(): Promise<void> {
       await cmdList();
       break;
     case "switch":
-    case "use":
-      if (!args[1]) {
-        await cmdDefault();
+    case "use": {
+      const parsed = parseSwitchArgs(args.slice(1));
+      if (!parsed.identifier) {
+        await cmdDefault(parsed.options);
       } else {
-        await cmdSwitch(args[1]);
+        await cmdSwitch(parsed.identifier, parsed.options);
       }
       break;
+    }
+    case "gui-switch":
+    case "gui-use": {
+      const parsed = parseSwitchArgs(args.slice(1), { restartCodexGui: true });
+      if (!parsed.identifier) {
+        await cmdDefault(parsed.options);
+      } else {
+        await cmdSwitch(parsed.identifier, parsed.options);
+      }
+      break;
+    }
     case "remove":
     case "rm":
       if (!args[1]) {
