@@ -12,6 +12,10 @@ interface RefreshResponse {
 
 /** Refresh OAuth tokens if the access token is expired */
 export async function refreshIfExpired(auth: CodexAuthFile): Promise<{ auth: CodexAuthFile; refreshed: boolean }> {
+  if (!auth.tokens) {
+    // API-key accounts have no OAuth tokens to refresh
+    return { auth, refreshed: false };
+  }
   if (!isTokenExpired(auth.tokens.access_token)) {
     return { auth, refreshed: false };
   }

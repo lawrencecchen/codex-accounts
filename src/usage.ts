@@ -18,10 +18,16 @@ function formatDuration(seconds: number): string {
   return parts.length > 0 ? parts.join(" ") : "<1m";
 }
 
+function resetAfterSeconds(window: { reset_after_seconds?: number; reset_at?: number }): number | undefined {
+  if (window.reset_after_seconds !== undefined) return window.reset_after_seconds;
+  if (window.reset_at === undefined) return undefined;
+  return Math.max(0, window.reset_at - Math.floor(Date.now() / 1000));
+}
+
 /** Refresh auth and persist if needed, returns fresh auth */
 export async function ensureFreshAuth(auth: CodexAuthFile): Promise<CodexAuthFile> {
   const { auth: freshAuth, refreshed } = await refreshIfExpired(auth);
-  if (refreshed) {
+  if (refreshed && freshAuth.tokens) {
     const email = extractEmail(freshAuth.tokens.id_token);
     if (email) {
       const stored = findAccount(email);
@@ -36,6 +42,9 @@ export async function ensureFreshAuth(auth: CodexAuthFile): Promise<CodexAuthFil
 
 /** Fetch usage for a single (already-refreshed) auth credential */
 export async function fetchUsage(auth: CodexAuthFile): Promise<UsageResponse> {
+  if (!auth.tokens) {
+    throw new Error("Cannot fetch ChatGPT usage for an API-key account; use 'cx usage' instead.");
+  }
   const headers: Record<string, string> = {
     Authorization: `Bearer ${auth.tokens.access_token}`,
   };
@@ -76,14 +85,12 @@ export function formatUsage(
     const windowMin = rl.primary_window.limit_window_seconds
       ? Math.round(rl.primary_window.limit_window_seconds / 60)
       : 300;
+    const resetSeconds = resetAfterSeconds(rl.primary_window);
     result.primary = {
       usedPercent: rl.primary_window.used_percent,
       windowMinutes: windowMin,
-      resetsIn: rl.primary_window.reset_after_seconds
-        ? formatDuration(rl.primary_window.reset_after_seconds)
-        : rl.primary_window.reset_at
-          ? formatDuration(rl.primary_window.reset_at - Math.floor(Date.now() / 1000))
-          : undefined,
+      resetsIn: resetSeconds !== undefined ? formatDuration(resetSeconds) : undefined,
+      resetAfterSeconds: resetSeconds,
     };
   }
 
@@ -91,14 +98,12 @@ export function formatUsage(
     const windowMin = rl.secondary_window.limit_window_seconds
       ? Math.round(rl.secondary_window.limit_window_seconds / 60)
       : undefined;
+    const resetSeconds = resetAfterSeconds(rl.secondary_window);
     result.secondary = {
       usedPercent: rl.secondary_window.used_percent,
       windowMinutes: windowMin,
-      resetsIn: rl.secondary_window.reset_after_seconds
-        ? formatDuration(rl.secondary_window.reset_after_seconds)
-        : rl.secondary_window.reset_at
-          ? formatDuration(rl.secondary_window.reset_at - Math.floor(Date.now() / 1000))
-          : undefined,
+      resetsIn: resetSeconds !== undefined ? formatDuration(resetSeconds) : undefined,
+      resetAfterSeconds: resetSeconds,
     };
   }
 
@@ -106,20 +111,10 @@ export function formatUsage(
     result.additionalLimits = usage.additional_rate_limits.map(arl => ({
       name: arl.limit_name || arl.metered_feature || "unknown",
       primary: arl.rate_limit.primary_window
-        ? {
-            usedPercent: arl.rate_limit.primary_window.used_percent,
-            resetsIn: arl.rate_limit.primary_window.reset_after_seconds
-              ? formatDuration(arl.rate_limit.primary_window.reset_after_seconds)
-              : undefined,
-          }
+        ? formatLimitWindow(arl.rate_limit.primary_window)
         : undefined,
       secondary: arl.rate_limit.secondary_window
-        ? {
-            usedPercent: arl.rate_limit.secondary_window.used_percent,
-            resetsIn: arl.rate_limit.secondary_window.reset_after_seconds
-              ? formatDuration(arl.rate_limit.secondary_window.reset_after_seconds)
-              : undefined,
-          }
+        ? formatLimitWindow(arl.rate_limit.secondary_window)
         : undefined,
     }));
   }
@@ -133,4 +128,13 @@ export function formatUsage(
   }
 
   return result;
+}
+
+function formatLimitWindow(window: { used_percent: number; reset_after_seconds?: number; reset_at?: number }) {
+  const resetSeconds = resetAfterSeconds(window);
+  return {
+    usedPercent: window.used_percent,
+    resetsIn: resetSeconds !== undefined ? formatDuration(resetSeconds) : undefined,
+    resetAfterSeconds: resetSeconds,
+  };
 }

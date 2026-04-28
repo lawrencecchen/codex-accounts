@@ -1,4 +1,4 @@
-import type { AccountUsage } from "./types.js";
+import type { AccountUsage, ApiKeyUsageSnapshot, ClaudeProfileInfo, DailyUsage } from "./types.js";
 
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
@@ -80,14 +80,65 @@ function formatDisplayName(email: string): string {
     : email;
 }
 
+function fmtUsd(n: number): string {
+  if (n === 0) return "$0";
+  if (n < 0.01) return `$${n.toFixed(4)}`;
+  if (n < 1) return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(2)}`;
+}
+
+function fmtTokens(n: number): string {
+  if (n === 0) return "0";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function fmtAge(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s ago`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m ago`;
+  if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h ago`;
+  return `${Math.round(ms / 86_400_000)}d ago`;
+}
+
+function totalTokens(d: DailyUsage): number {
+  return d.inputTokens + d.cachedInputTokens + d.outputTokens;
+}
+
+function renderApiKeySpend(snapshot: ApiKeyUsageSnapshot, labelWidth: number): void {
+  const scope = snapshot.projectId
+    ? `proj ${snapshot.projectName ?? snapshot.projectId}`
+    : "org-wide";
+  console.log(
+    `  ${DIM}${"scope".padEnd(labelWidth)}:${RESET} ${scope} ${DIM}via ${snapshot.adminKeyLabel}, ${fmtAge(snapshot.fetchedAt)}${RESET}`,
+  );
+  const todayUsdStr = snapshot.todayCostEstimated
+    ? `~${fmtUsd(snapshot.todayUsd)}`
+    : fmtUsd(snapshot.todayUsd);
+  const todayCostNote = snapshot.todayCostEstimated ? ` ${DIM}est${RESET}` : "";
+  const today = `${todayUsdStr.padStart(8)}${todayCostNote} ${DIM}(${fmtTokens(snapshot.todayTokens)} tok)${RESET}`;
+  const week = `${fmtUsd(snapshot.weekUsd).padStart(8)} ${DIM}(${fmtTokens(snapshot.weekTokens)} tok)${RESET}`;
+  const month = `${fmtUsd(snapshot.monthUsd).padStart(8)} ${DIM}(${fmtTokens(snapshot.monthTokens)} tok)${RESET}`;
+  console.log(`  ${DIM}${"today".padEnd(labelWidth)}:${RESET} ${today}`);
+  console.log(`  ${DIM}${"7d".padEnd(labelWidth)}:${RESET} ${week}`);
+  console.log(`  ${DIM}${"30d".padEnd(labelWidth)}:${RESET} ${month}`);
+  if (snapshot.topModel && snapshot.topModel.tokens > 0) {
+    console.log(
+      `  ${DIM}${"top model".padEnd(labelWidth)}:${RESET} ${snapshot.topModel.model} ${DIM}(${fmtTokens(snapshot.topModel.tokens)} tok 30d)${RESET}`,
+    );
+  }
+}
+
 /** Display a single account's usage */
 function displayAccount(usage: AccountUsage, globalLabelWidth: number, index?: number): void {
   const activeMarker = usage.isActive ? ` ${CYAN}(active)${RESET}` : "";
+  const recommendedMarker = usage.gtoRecommended ? ` ${GREEN}[recommended]${RESET}` : "";
   const plan = usage.planType ? ` ${DIM}[${usage.planType}]${RESET}` : "";
   const prefix = index !== undefined ? `${DIM}${index})${RESET} ` : "";
 
   const displayName = formatDisplayName(usage.email);
-  console.log(`${prefix}${BOLD}${WHITE}${displayName}${RESET}${plan}${activeMarker}`);
+  console.log(`${prefix}${BOLD}${WHITE}${displayName}${RESET}${plan}${activeMarker}${recommendedMarker}`);
 
   if (usage.error) {
     console.log(`  ${RED}Error: ${usage.error}${RESET}`);
@@ -96,6 +147,10 @@ function displayAccount(usage: AccountUsage, globalLabelWidth: number, index?: n
   }
 
   const rows = collectRows(usage);
+
+  if (usage.gtoReason) {
+    console.log(`  ${DIM}${"pick".padEnd(globalLabelWidth)}:${RESET} ${usage.gtoReason}`);
+  }
 
   for (const row of rows) {
     const padded = row.label.padEnd(globalLabelWidth);
@@ -113,6 +168,12 @@ function displayAccount(usage: AccountUsage, globalLabelWidth: number, index?: n
     } else if (usage.credits.balance) {
       console.log(`  ${DIM}${padded}:${RESET} $${usage.credits.balance}`);
     }
+  }
+
+  if (usage.apiKeySpend) {
+    renderApiKeySpend(usage.apiKeySpend, globalLabelWidth);
+  } else if (usage.apiKeyHint) {
+    console.log(`  ${DIM}${usage.apiKeyHint}${RESET}`);
   }
 
   console.log();
@@ -135,6 +196,12 @@ export function displayAllUsage(usages: AccountUsage[]): void {
     }
     if (usage.credits) {
       maxLabelWidth = Math.max(maxLabelWidth, "Credits".length);
+    }
+    if (usage.apiKeySpend) {
+      maxLabelWidth = Math.max(maxLabelWidth, "top model".length);
+    }
+    if (usage.gtoReason) {
+      maxLabelWidth = Math.max(maxLabelWidth, "pick".length);
     }
   }
 
@@ -161,6 +228,12 @@ export function displayAllUsageNumbered(usages: AccountUsage[]): void {
     if (usage.credits) {
       maxLabelWidth = Math.max(maxLabelWidth, "Credits".length);
     }
+    if (usage.apiKeySpend) {
+      maxLabelWidth = Math.max(maxLabelWidth, "top model".length);
+    }
+    if (usage.gtoReason) {
+      maxLabelWidth = Math.max(maxLabelWidth, "pick".length);
+    }
   }
 
   console.log();
@@ -186,4 +259,143 @@ export function displayAccountList(accounts: { email: string; isActive: boolean;
   console.log();
   console.log(`${DIM}* = currently active in ~/.codex/auth.json${RESET}`);
   console.log();
+}
+
+// --- Claude Code profile display ---
+
+/** Format ISO reset time as relative duration */
+function formatResetTime(resetsAt: string): string {
+  const remaining = new Date(resetsAt).getTime() - Date.now();
+  if (remaining <= 0) return "now";
+  const days = Math.floor(remaining / 86400000);
+  const hours = Math.floor((remaining % 86400000) / 3600000);
+  const mins = Math.floor((remaining % 3600000) / 60000);
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (mins > 0 && days === 0) parts.push(`${mins}m`);
+  return parts.length > 0 ? parts.join(" ") : "<1m";
+}
+
+interface ClaudeRow {
+  label: string;
+  usedPercent: number;
+  resetsIn?: string;
+}
+
+/** Collect usage rows from Claude usage data */
+function collectClaudeRows(p: ClaudeProfileInfo): ClaudeRow[] {
+  const rows: ClaudeRow[] = [];
+  if (!p.usage) return rows;
+
+  if (p.usage.five_hour?.utilization != null) {
+    rows.push({
+      label: "5h limit",
+      usedPercent: p.usage.five_hour.utilization,
+      resetsIn: p.usage.five_hour.resets_at ? formatResetTime(p.usage.five_hour.resets_at) : undefined,
+    });
+  }
+  if (p.usage.seven_day?.utilization != null) {
+    rows.push({
+      label: "7d limit",
+      usedPercent: p.usage.seven_day.utilization,
+      resetsIn: p.usage.seven_day.resets_at ? formatResetTime(p.usage.seven_day.resets_at) : undefined,
+    });
+  }
+  if (p.usage.seven_day_opus?.utilization != null) {
+    rows.push({
+      label: "Opus (weekly)",
+      usedPercent: p.usage.seven_day_opus.utilization,
+      resetsIn: p.usage.seven_day_opus.resets_at ? formatResetTime(p.usage.seven_day_opus.resets_at) : undefined,
+    });
+  }
+  if (p.usage.seven_day_sonnet?.utilization != null) {
+    rows.push({
+      label: "Sonnet (weekly)",
+      usedPercent: p.usage.seven_day_sonnet.utilization,
+      resetsIn: p.usage.seven_day_sonnet.resets_at ? formatResetTime(p.usage.seven_day_sonnet.resets_at) : undefined,
+    });
+  }
+  if (p.usage.extra_usage?.is_enabled && p.usage.extra_usage.utilization != null) {
+    rows.push({
+      label: "Extra usage",
+      usedPercent: p.usage.extra_usage.utilization,
+    });
+  }
+
+  return rows;
+}
+
+function displayClaudeProfile(p: ClaudeProfileInfo, globalLabelWidth: number, index?: number): void {
+  const prefix = index !== undefined ? `${DIM}${index})${RESET} ` : "";
+  const active = p.isActive ? ` ${CYAN}(active)${RESET}` : "";
+
+  if (p.error) {
+    console.log(`${prefix}${BOLD}${WHITE}${p.name}${RESET}${active}`);
+    console.log(`  ${RED}Error: ${p.error}${RESET}`);
+    console.log();
+    return;
+  }
+
+  if (!p.auth || !p.auth.loggedIn) {
+    console.log(`${prefix}${BOLD}${WHITE}${p.name}${RESET}${active}`);
+    console.log(`  ${DIM}not logged in${RESET}`);
+    console.log();
+    return;
+  }
+
+  const plan = p.auth.subscriptionType ? ` ${DIM}[${p.auth.subscriptionType}]${RESET}` : "";
+  const org = p.auth.orgName ? ` ${DIM}(${p.auth.orgName})${RESET}` : "";
+  console.log(`${prefix}${BOLD}${WHITE}${p.name}${RESET}${plan}${active}`);
+
+  const rows = collectClaudeRows(p);
+
+  if (rows.length > 0) {
+    for (const row of rows) {
+      const padded = row.label.padEnd(globalLabelWidth);
+      const pct = row.usedPercent;
+      const remaining = (100 - pct).toFixed(1);
+      const color = usageColor(pct);
+      const resetStr = row.resetsIn ? ` ${DIM}resets in ${row.resetsIn}${RESET}` : "";
+      console.log(`  ${DIM}${padded}:${RESET} ${renderBar(pct)} ${color}${remaining}% left${RESET}${resetStr}`);
+    }
+  } else {
+    // No usage data — show email as fallback info
+    console.log(`  ${DIM}${p.auth.email || "unknown"}${org}${RESET}`);
+  }
+
+  console.log();
+}
+
+/** Compute global label width across all Claude profiles */
+function claudeGlobalLabelWidth(profiles: ClaudeProfileInfo[]): number {
+  let max = 0;
+  for (const p of profiles) {
+    for (const row of collectClaudeRows(p)) {
+      max = Math.max(max, row.label.length);
+    }
+  }
+  return max;
+}
+
+/** Display Claude profiles */
+export function displayClaudeProfiles(profiles: ClaudeProfileInfo[]): void {
+  if (profiles.length === 0) {
+    console.log(`${DIM}No Claude profiles. Run 'cx claude add' to create one.${RESET}`);
+    return;
+  }
+  const labelWidth = claudeGlobalLabelWidth(profiles);
+  console.log();
+  for (const p of profiles) displayClaudeProfile(p, labelWidth);
+}
+
+/** Display Claude profiles with numbered indices for interactive selection */
+export function displayClaudeProfilesNumbered(profiles: ClaudeProfileInfo[]): void {
+  if (profiles.length === 0) {
+    console.log(`${DIM}No Claude profiles. Run 'cx claude add' to create one.${RESET}`);
+    return;
+  }
+  const labelWidth = claudeGlobalLabelWidth(profiles);
+  console.log();
+  for (let i = 0; i < profiles.length; i++) displayClaudeProfile(profiles[i]!, labelWidth, i + 1);
 }
