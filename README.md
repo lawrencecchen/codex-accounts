@@ -37,6 +37,7 @@ cx add-key            Add an API key account
 cx import             Import current ~/.codex/auth.json
 cx list               List all accounts
 cx switch [email]     Switch active account (interactive if no email)
+cx gui-switch [email] Switch active account and restart Codex.app
 cx remove <email>     Remove an account
 cx status             Show usage (non-interactive)
 ```
@@ -88,6 +89,8 @@ cx switch startup                # matches bob@startup.io
 ```
 
 Switching writes to `~/.codex/auth.json`. Restart running Codex sessions to pick up the new account.
+
+For the desktop app, use `cx gui-switch <email>` or `cx switch <email> --restart-codex-gui`. On macOS this kills and reopens Codex.app when it is already running, so the GUI reloads the new auth file.
 
 ## How it works
 
