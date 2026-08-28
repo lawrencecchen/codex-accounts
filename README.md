@@ -78,7 +78,7 @@ For each OAuth account, `cx` fetches rate limits from the OpenAI API and display
 
 - **5h rolling limit** with percentage remaining and reset countdown (shared Codex allowance for GPT-5.6 Sol / Terra / Luna)
 - **Weekly limit** with percentage remaining and reset countdown
-- **Extra buckets** only when the account has them. GPT-5.3-Codex-Spark is still a ChatGPT Pro research preview with its own quota; it is not the default Codex model family
+- **Extra buckets** only when they apply to the account. GPT-5.3-Codex-Spark is a ChatGPT Pro research preview; Plus accounts do not show a Spark bar even if the usage API still returns an unused Spark bucket
 - **Plan type** (free, plus, pro, team, etc.)
 - **Credits balance**
 

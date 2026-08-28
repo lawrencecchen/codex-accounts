@@ -1,4 +1,4 @@
-import type { CodexAuthFile, UsageResponse, AccountUsage } from "./types.js";
+import type { AdditionalRateLimit, CodexAuthFile, UsageResponse, AccountUsage } from "./types.js";
 import { extractEmail } from "./jwt.js";
 import { refreshIfExpired } from "./token-refresh.js";
 import { saveAccount, findAccount } from "./store.js";
@@ -107,8 +107,11 @@ export function formatUsage(
     };
   }
 
-  if (usage.additional_rate_limits?.length) {
-    result.additionalLimits = usage.additional_rate_limits.map(arl => ({
+  const extraLimits = (usage.additional_rate_limits ?? []).filter(arl =>
+    shouldShowAdditionalLimit(arl, usage.plan_type),
+  );
+  if (extraLimits.length) {
+    result.additionalLimits = extraLimits.map(arl => ({
       name: arl.limit_name || arl.metered_feature || "unknown",
       primary: arl.rate_limit.primary_window
         ? formatLimitWindow(arl.rate_limit.primary_window)
@@ -128,6 +131,22 @@ export function formatUsage(
   }
 
   return result;
+}
+
+/** Spark is a ChatGPT Pro research preview. /wham/usage still returns a 0% Spark bucket for Plus. */
+export function planHasSparkAccess(planType?: string): boolean {
+  const plan = (planType ?? "").trim().toLowerCase();
+  return plan === "pro" || plan.startsWith("pro_") || plan.startsWith("pro-");
+}
+
+export function isSparkAdditionalLimit(limit: AdditionalRateLimit): boolean {
+  const haystack = `${limit.limit_name ?? ""} ${limit.metered_feature ?? ""}`.toLowerCase();
+  return haystack.includes("spark") || haystack.includes("bengalfox");
+}
+
+export function shouldShowAdditionalLimit(limit: AdditionalRateLimit, planType?: string): boolean {
+  if (!isSparkAdditionalLimit(limit)) return true;
+  return planHasSparkAccess(planType);
 }
 
 function formatLimitWindow(window: { used_percent: number; reset_after_seconds?: number; reset_at?: number }) {
