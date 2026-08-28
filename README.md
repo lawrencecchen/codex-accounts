@@ -32,7 +32,7 @@ Run `cx` with no arguments for the interactive view: see usage for every account
 
 ```
 cx                    Interactive: show all accounts + switch
-cx add                Add account via OAuth (opens codex login)
+cx add [--device-auth] Add account via OAuth, or device-code login
 cx add-key            Add an API key account
 cx import             Import current ~/.codex/auth.json
 cx list               List all accounts
@@ -51,6 +51,14 @@ cx add          # opens browser, log in with account #1
 cx add          # opens browser, log in with account #2
 cx add          # ...
 ```
+
+On a remote, SSH, or other headless machine, use Codex device-code login instead of the browser callback:
+
+```bash
+cx add --device-auth
+```
+
+That runs `codex login --device-auth`, prints a URL and one-time code, then imports the resulting `~/.codex/auth.json` the same way as a normal `cx add`. Enable device-code login in ChatGPT security settings (or workspace permissions) first.
 
 Already logged in? Import your current session without re-authenticating:
 

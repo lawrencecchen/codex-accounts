@@ -13,6 +13,8 @@ import { validateAdminKey, listProjects, fetchUsageRollup } from "./openai-admin
 import { rankUsagesForGto } from "./gto.js";
 import { restartCodexGui } from "./codex-gui.js";
 import { parseSwitchArgs, type SwitchOptions } from "./switch-options.js";
+import { parseAddArgs, type AddOptions } from "./add-options.js";
+import { runCodexLogin } from "./codex-login.js";
 import type { StoredAccount, CodexAuthFile, AdminKeyEntry, ApiKeyUsageSnapshot, AccountUsage } from "./types.js";
 
 const USAGE_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -21,7 +23,7 @@ const HELP = `cx - Manage multiple Codex and Claude Code accounts
 
 Usage:
   cx                    Show Codex usage for all accounts and switch
-  cx add                Add a new Codex account (opens OAuth login)
+  cx add [--device-auth] Add a new Codex account (OAuth or device-code login)
   cx add-key            Add a Codex API key account
   cx import             Import current ~/.codex/auth.json account
   cx list               List all Codex accounts
@@ -42,31 +44,14 @@ Usage:
   cx help               Show this help message
 `;
 
-/** Run codex login and capture the resulting auth */
-async function runCodexLogin(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("codex", ["login"], {
-      stdio: "inherit",
-    });
-    child.on("error", (err) => {
-      reject(new Error(`Failed to run 'codex login': ${err.message}. Is codex installed?`));
-    });
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`codex login exited with code ${code}`));
-      }
-    });
-  });
-}
-
-async function cmdAdd(): Promise<void> {
+async function cmdAdd(options: AddOptions = { deviceAuth: false }): Promise<void> {
   // Save current active auth before login overwrites it
   syncActiveToStore();
 
-  console.log("Opening Codex OAuth login...\n");
-  await runCodexLogin();
+  console.log(options.deviceAuth
+    ? "Opening Codex device-code login...\n"
+    : "Opening Codex OAuth login...\n");
+  await runCodexLogin(options);
 
   // Read the new auth that codex login wrote
   const auth = readActiveAuth();
@@ -823,9 +808,11 @@ async function main(): Promise<void> {
 
   switch (command) {
     case "add":
-    case "login":
-      await cmdAdd();
+    case "login": {
+      const options = parseAddArgs(args.slice(1));
+      await cmdAdd(options);
       break;
+    }
     case "add-key":
     case "add-api-key":
       await cmdAddKey();
