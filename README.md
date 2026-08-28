@@ -76,10 +76,10 @@ cx add-key
 
 For each OAuth account, `cx` fetches rate limits from the OpenAI API and displays:
 
-- **5h rolling limit** with percentage remaining and reset countdown
+- **5h rolling limit** with percentage remaining and reset countdown (shared Codex allowance for GPT-5.6 Sol / Terra / Luna)
 - **Weekly limit** with percentage remaining and reset countdown
-- **Additional model-specific limits** (e.g. GPT-5.3-Codex-Spark)
-- **Plan type** (free, pro, plus, team, etc.)
+- **Extra buckets** only when the account has them. GPT-5.3-Codex-Spark is still a ChatGPT Pro research preview with its own quota; it is not the default Codex model family
+- **Plan type** (free, plus, pro, team, etc.)
 - **Credits balance**
 
 Color-coded bars: green (<70% used), yellow (70-90%), red (90%+).
