@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatUsage, shouldShowAdditionalLimit } from "../dist/usage.js";
+import { formatAuthError, formatUsage, shouldShowAdditionalLimit } from "../dist/usage.js";
 
 const sparkBucket = {
   limit_name: "GPT-5.3-Codex-Spark",
@@ -66,5 +66,31 @@ test("shouldShowAdditionalLimit treats Spark as Pro-only", () => {
       rate_limit: { allowed: true, limit_reached: false },
     }, "plus"),
     true,
+  );
+});
+
+test("hides gpt-reserve extra bucket and empty credits", () => {
+  const formatted = formatUsage("plus@example.com", true, {
+    ...plusUsage(),
+    additional_rate_limits: [{
+      limit_name: "gpt-reserve",
+      metered_feature: "base_model_inference",
+      rate_limit: sparkBucket.rate_limit,
+    }],
+    credits: {
+      has_credits: false,
+      unlimited: false,
+      balance: "0",
+    },
+  });
+
+  assert.equal(formatted.additionalLimits, undefined);
+  assert.equal(formatted.credits, undefined);
+});
+
+test("formatAuthError tells the user to re-add invalidated sessions", () => {
+  assert.match(
+    formatAuthError(new Error('Usage fetch failed (401): "code": "token_invalidated"')),
+    /Session ended/,
   );
 });

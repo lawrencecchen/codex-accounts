@@ -16,8 +16,8 @@ test("defaults to browser OAuth login", () => {
 });
 
 test("forwards --device-auth to codex login", () => {
-  assert.deepEqual(codexLoginArgs({ deviceAuth: false }), ["login"]);
-  assert.deepEqual(codexLoginArgs({ deviceAuth: true }), ["login", "--device-auth"]);
+  assert.deepEqual(codexLoginArgs({ deviceAuth: false }), ["login", "-c", "cli_auth_credentials_store=file"]);
+  assert.deepEqual(codexLoginArgs({ deviceAuth: true }), ["login", "--device-auth", "-c", "cli_auth_credentials_store=file"]);
 });
 
 test("rejects unknown add flags", () => {

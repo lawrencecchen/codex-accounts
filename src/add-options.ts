@@ -23,5 +23,9 @@ export function parseAddArgs(args: string[]): AddOptions {
 
 /** Args passed to the `codex` binary for login. */
 export function codexLoginArgs(options: AddOptions): string[] {
-  return options.deviceAuth ? ["login", "--device-auth"] : ["login"];
+  const args = ["login"];
+  if (options.deviceAuth) args.push("--device-auth");
+  // Isolated logins write auth.json under CODEX_HOME instead of the OS keyring.
+  args.push("-c", "cli_auth_credentials_store=file");
+  return args;
 }

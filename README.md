@@ -58,7 +58,9 @@ On a remote, SSH, or other headless machine, use Codex device-code login instead
 cx add --device-auth
 ```
 
-That runs `codex login --device-auth`, prints a URL and one-time code, then imports the resulting `~/.codex/auth.json` the same way as a normal `cx add`. Enable device-code login in ChatGPT security settings (or workspace permissions) first.
+Login runs in an isolated `CODEX_HOME` so adding a new account does not revoke tokens for accounts already in the store. After login succeeds, `cx` imports that snapshot and makes it the active `~/.codex/auth.json`.
+
+Enable device-code login in ChatGPT security settings (or workspace permissions) first. If an existing stored account says `Session ended`, re-add that ChatGPT user with `cx add --device-auth`.
 
 Already logged in? Import your current session without re-authenticating:
 
@@ -78,7 +80,7 @@ For each OAuth account, `cx` fetches rate limits from the OpenAI API and display
 
 - **5h rolling limit** with percentage remaining and reset countdown (shared Codex allowance for GPT-5.6 Sol / Terra / Luna)
 - **Weekly limit** with percentage remaining and reset countdown
-- **Extra buckets** only when they apply to the account. GPT-5.3-Codex-Spark is a ChatGPT Pro research preview; Plus accounts do not show a Spark bar even if the usage API still returns an unused Spark bucket
+- **Extra buckets** only when they apply to the account. Plus accounts hide unused Spark and internal `gpt-reserve` bars that the usage API still returns
 - **Plan type** (free, plus, pro, team, etc.)
 - **Credits balance**
 

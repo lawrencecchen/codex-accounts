@@ -10,14 +10,10 @@ interface RefreshResponse {
   id_token: string;
 }
 
-/** Refresh OAuth tokens if the access token is expired */
-export async function refreshIfExpired(auth: CodexAuthFile): Promise<{ auth: CodexAuthFile; refreshed: boolean }> {
+/** Always exchange the refresh token. Access JWTs can still look valid after server-side revoke. */
+export async function refreshTokens(auth: CodexAuthFile): Promise<CodexAuthFile> {
   if (!auth.tokens) {
-    // API-key accounts have no OAuth tokens to refresh
-    return { auth, refreshed: false };
-  }
-  if (!isTokenExpired(auth.tokens.access_token)) {
-    return { auth, refreshed: false };
+    throw new Error("Cannot refresh an API-key account");
   }
 
   const res = await fetch(AUTH_ENDPOINT, {
@@ -40,7 +36,7 @@ export async function refreshIfExpired(auth: CodexAuthFile): Promise<{ auth: Cod
     throw new Error("Token refresh response missing required fields");
   }
 
-  const refreshed: CodexAuthFile = {
+  return {
     ...auth,
     tokens: {
       ...auth.tokens,
@@ -50,6 +46,17 @@ export async function refreshIfExpired(auth: CodexAuthFile): Promise<{ auth: Cod
     },
     last_refresh: new Date().toISOString(),
   };
+}
 
-  return { auth: refreshed, refreshed: true };
+/** Refresh OAuth tokens if the access token is expired */
+export async function refreshIfExpired(auth: CodexAuthFile): Promise<{ auth: CodexAuthFile; refreshed: boolean }> {
+  if (!auth.tokens) {
+    // API-key accounts have no OAuth tokens to refresh
+    return { auth, refreshed: false };
+  }
+  if (!isTokenExpired(auth.tokens.access_token)) {
+    return { auth, refreshed: false };
+  }
+
+  return { auth: await refreshTokens(auth), refreshed: true };
 }
