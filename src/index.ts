@@ -17,6 +17,7 @@ import { restartCodexGui } from "./codex-gui.js";
 import { parseSwitchArgs, type SwitchOptions } from "./switch-options.js";
 import { parseAddArgs, type AddOptions } from "./add-options.js";
 import { runCodexLogin } from "./codex-login.js";
+import { questionOrEscape } from "./interactive.js";
 import type { StoredAccount, CodexAuthFile, AdminKeyEntry, ApiKeyUsageSnapshot, AccountUsage } from "./types.js";
 
 const USAGE_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -558,11 +559,8 @@ async function promptSwitch(options: SwitchOptions = { restartCodexGui: false })
   }
   console.log();
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await new Promise<string>((resolve) => {
-    rl.question("Switch to (#): ", resolve);
-  });
-  rl.close();
+  const answer = await questionOrEscape("Switch to (#, Esc to cancel): ");
+  if (answer === undefined) return;
 
   const idx = parseInt(answer.trim(), 10) - 1;
   if (isNaN(idx) || idx < 0 || idx >= accounts.length) {
@@ -736,11 +734,8 @@ async function cmdDefault(options: SwitchOptions = { restartCodexGui: false }): 
   maybeSpawnBackgroundRefresh();
 
   // Prompt to switch
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await new Promise<string>((resolve) => {
-    rl.question(`Switch to (#): `, resolve);
-  });
-  rl.close();
+  const answer = await questionOrEscape("Switch to (#, Esc to cancel): ");
+  if (answer === undefined) return;
 
   const trimmed = answer.trim();
   if (!trimmed) return;
