@@ -8,6 +8,7 @@ import {
   cleanupInstance, readCredential, fetchClaudeUsage,
 } from "./claude-store.js";
 import { displayClaudeProfiles, displayClaudeProfilesNumbered } from "./display.js";
+import { questionOrEscape } from "./interactive.js";
 import type { ClaudeProfileInfo } from "./types.js";
 
 const HELP = `cx claude - Manage multiple Claude Code profiles
@@ -192,9 +193,8 @@ async function cmdPromptSwitch(): Promise<void> {
   }
   displayClaudeProfilesNumbered(infos);
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await new Promise<string>((resolve) => rl.question("Switch to (#): ", resolve));
-  rl.close();
+  const answer = await questionOrEscape("Switch to (#, Esc to cancel): ");
+  if (answer === undefined) return;
 
   const trimmed = answer.trim();
   if (!trimmed) return;

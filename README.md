@@ -32,7 +32,7 @@ Run `cx` with no arguments for the interactive view: see usage for every account
 
 ```
 cx                    Interactive: show all accounts + switch
-cx add                Add account via OAuth (opens codex login)
+cx add [--device-auth] Add account via OAuth, or device-code login
 cx add-key            Add an API key account
 cx import             Import current ~/.codex/auth.json
 cx list               List all accounts
@@ -52,6 +52,16 @@ cx add          # opens browser, log in with account #2
 cx add          # ...
 ```
 
+On a remote, SSH, or other headless machine, use Codex device-code login instead of the browser callback:
+
+```bash
+cx add --device-auth
+```
+
+Login runs in an isolated `CODEX_HOME` so adding a new account does not revoke tokens for accounts already in the store. After login succeeds, `cx` imports that snapshot and makes it the active `~/.codex/auth.json`.
+
+Enable device-code login in ChatGPT security settings (or workspace permissions) first. If an existing stored account says `Session ended`, re-add that ChatGPT user with `cx add --device-auth`.
+
 Already logged in? Import your current session without re-authenticating:
 
 ```bash
@@ -68,10 +78,10 @@ cx add-key
 
 For each OAuth account, `cx` fetches rate limits from the OpenAI API and displays:
 
-- **5h rolling limit** with percentage remaining and reset countdown
+- **5h rolling limit** with percentage remaining and reset countdown (shared Codex allowance for GPT-5.6 Sol / Terra / Luna)
 - **Weekly limit** with percentage remaining and reset countdown
-- **Additional model-specific limits** (e.g. GPT-5.3-Codex-Spark)
-- **Plan type** (free, pro, plus, team, etc.)
+- **Extra buckets** only when they apply to the account. Plus accounts hide unused Spark and internal `gpt-reserve` bars that the usage API still returns
+- **Plan type** (free, plus, pro, team, etc.)
 - **Credits balance**
 
 Color-coded bars: green (<70% used), yellow (70-90%), red (90%+).

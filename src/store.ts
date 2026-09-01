@@ -31,14 +31,19 @@ function emailToFilename(email: string): string {
   return email.replace(/[^a-zA-Z0-9._@-]/g, "_") + ".json";
 }
 
-/** Read the current active auth from ~/.codex/auth.json */
-export function readActiveAuth(): CodexAuthFile | null {
+/** Read an auth.json from a Codex home directory. */
+export function readAuthFromHome(codexHome: string): CodexAuthFile | null {
   try {
-    const raw = readFileSync(CODEX_AUTH_PATH, "utf-8");
+    const raw = readFileSync(join(codexHome, "auth.json"), "utf-8");
     return JSON.parse(raw) as CodexAuthFile;
   } catch {
     return null;
   }
+}
+
+/** Read the current active auth from ~/.codex/auth.json */
+export function readActiveAuth(): CodexAuthFile | null {
+  return readAuthFromHome(join(homedir(), ".codex"));
 }
 
 /** Write auth to ~/.codex/auth.json (with backup) */
